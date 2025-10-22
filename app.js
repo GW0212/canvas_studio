@@ -511,3 +511,117 @@ resetBtn.addEventListener('click', ()=>{
     console.warn('[CanvasStudio] Realtime wrapper error', e);
   }
 })();
+
+/* === Realtime Sync with Persistence === */
+(function(){
+  try{
+    if(!window.firebase || !window.FIREBASE_CONFIG){ console.warn('[CanvasStudio] Firebase missing'); return; }
+    const app = firebase.initializeApp(window.FIREBASE_CONFIG);
+    const db = firebase.database();
+    const ROOM = new URLSearchParams(location.search).get('room') || '1';
+    const clientId = Math.random().toString(36).slice(2);
+    const opsRef = db.ref('rooms/'+ROOM+'/ops');
+    const canvas = document.getElementById('board');
+    if(!canvas){ console.warn('[CanvasStudio] No canvas found'); return; }
+    const ctx = canvas.getContext('2d');
+    const processed = new Set();
+
+    function getState(){
+      const colorEl=document.getElementById('colorPicker');
+      const alphaEl=document.getElementById('alphaRange');
+      const sizeEl=document.getElementById('sizeRange');
+      const fillEl=document.getElementById('fillShape');
+      return {
+        color: colorEl?colorEl.value:'#000000',
+        alpha: alphaEl?parseFloat(alphaEl.value):1,
+        size: sizeEl?parseInt(sizeEl.value,10):8,
+        fill: fillEl?fillEl.checked:false
+      };
+    }
+
+    function applyOp(op){
+      if(!op||op.clientId===clientId)return;
+      ctx.save();
+      ctx.globalAlpha = op.alpha??1;
+      ctx.lineWidth = op.size??8;
+      ctx.strokeStyle = op.color??'#000';
+      ctx.fillStyle = op.color??'#000';
+      ctx.lineJoin='round';ctx.lineCap='round';
+      if(op.kind==='path'){
+        ctx.globalCompositeOperation = (op.tool==='eraser')?'destination-out':'source-over';
+        ctx.beginPath();
+        ctx.moveTo(op.from.x,op.from.y);
+        ctx.lineTo(op.to.x,op.to.y);
+        ctx.stroke();
+      }else if(op.kind==='shape'){
+        ctx.globalCompositeOperation='source-over';
+        if(op.shape==='line'){
+          ctx.beginPath();ctx.moveTo(op.x1,op.y1);ctx.lineTo(op.x2,op.y2);ctx.stroke();
+        }else if(op.shape==='rect'){
+          const w=op.x2-op.x1,h=op.y2-op.y1;
+          if(op.fill)ctx.fillRect(op.x1,op.y1,w,h);else ctx.strokeRect(op.x1,op.y1,w,h);
+        }else if(op.shape==='circle'){
+          const r=Math.hypot(op.x2-op.x1,op.y2-op.y1);
+          ctx.beginPath();ctx.arc(op.x1,op.y1,r,0,Math.PI*2);
+          if(op.fill)ctx.fill();else ctx.stroke();
+        }
+      }else if(op.kind==='clear'){
+        ctx.globalCompositeOperation='source-over';
+        ctx.clearRect(0,0,canvas.width,canvas.height);
+        ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);
+      }
+      ctx.restore();
+    }
+
+    // === Load existing data and replay ===
+    opsRef.once('value').then(snap=>{
+      const data=snap.val()||{};
+      const arr=Object.entries(data).map(([k,v])=>({...v,key:k})).sort((a,b)=>(a.ts||0)-(b.ts||0));
+      ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);
+      arr.forEach(op=>{applyOp(op);processed.add(op.key);});
+    });
+
+    // === Live updates ===
+    opsRef.on('child_added', snap=>{
+      const key=snap.key;const op=snap.val();
+      if(processed.has(key))return;
+      applyOp(op);processed.add(key);
+    });
+
+    // === Hook drawing ===
+    const _move=window.moveDraw;const _end=window.endDraw;
+    window.moveDraw=function(e){
+      const prev={x:window.lastX,y:window.lastY};
+      _move.call(this,e);
+      try{
+        if(window.isDrawing&&prev.x&&prev.y){
+          const rect=canvas.getBoundingClientRect();
+          const x=(e.touches?e.touches[0].clientX:e.clientX)-rect.left;
+          const y=(e.touches?e.touches[0].clientY:e.clientY)-rect.top;
+          const s=getState();
+          opsRef.push({kind:'path',tool:(document.querySelector('input[name="tool"]:checked')||{}).value,from:prev,to:{x,y},...s,clientId,ts:Date.now()});
+        }
+      }catch(err){console.warn('emit path fail',err);}
+    };
+    window.endDraw=function(e){
+      _end.call(this,e);
+      try{
+        const t=(document.querySelector('input[name="tool"]:checked')||{}).value;
+        if(['line','rect','circle'].includes(t)){
+          const s=getState();
+          opsRef.push({kind:'shape',shape:t,x1:window.startX,y1:window.startY,x2:window.lastX,y2:window.lastY,fill:s.fill,color:s.color,alpha:s.alpha,size:s.size,clientId,ts:Date.now()});
+        }
+      }catch(err){}
+    };
+
+    // === Reset ===
+    const resetBtn=document.getElementById('resetBtn');
+    if(resetBtn){
+      resetBtn.addEventListener('click',()=>{
+        db.ref('rooms/'+ROOM).set(null);
+        opsRef.push({kind:'clear',clientId,ts:Date.now()});
+      });
+    }
+
+  }catch(err){console.error('[CanvasStudio] Firebase Sync Error',err);}
+})();

@@ -9,4 +9,3 @@ window.FIREBASE_CONFIG = {
   appId: "1:36647475629:web:94e1f18e34d0195945e924",
   measurementId: "G-5KE41BKVKY"
 };
-console.log('[CanvasStudio] Firebase config loaded', window.FIREBASE_CONFIG.projectId);
